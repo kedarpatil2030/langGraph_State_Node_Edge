@@ -1,125 +1,196 @@
+# ==========================================================
+# IMPORTS
+# ==========================================================
+
 from typing import TypedDict
+
+# Core LangGraph components
 from langgraph.graph import StateGraph, END
 
+# Required for Human-in-the-Loop
+from langgraph.types import interrupt, Command
 
-# ==================================================
+# Required to save workflow state when interrupted
+from langgraph.checkpoint.memory import MemorySaver
+
+
+# ==========================================================
 # STATE
-# ==================================================
+# ==========================================================
+#
+# State is shared across all nodes.
+# Every node can read and update this state.
+#
+# ==========================================================
 
 class ExpenseState(TypedDict):
     employee_name: str
     amount: int
-    receipt_available: bool
     approval_status: str
     result: str
 
 
-# ==================================================
-# NODE 1 - VALIDATE EXPENSE
-# ==================================================
+# ==========================================================
+# NODE 1 : VALIDATE EXPENSE
+# ==========================================================
+#
+# Purpose:
+# - Check expense amount
+# - Small expenses are auto-approved
+# - Large expenses require manager approval
+#
+# ==========================================================
 
 def validate_expense(state: ExpenseState):
 
-    print("\n[Node] Validate Expense")
+    print("\n[Node] validate_expense")
 
-    amount = state["amount"]
-    receipt = state["receipt_available"]
-
-    if not receipt:
-
-        return {
-            "approval_status": "reject"
-        }
-
-    if amount > 50000:
+    # If amount exceeds business threshold
+    # require manager approval.
+    if state["amount"] > 50000:
 
         print(
-            f"Expense amount ₹{amount} requires manager approval"
+            f"Expense ₹{state['amount']} requires manager approval"
         )
 
         return {
             "approval_status": "pending"
         }
 
-    print(
-        f"Expense amount ₹{amount} is auto-approved"
-    )
-
+    # Auto approve smaller expenses
     return {
         "approval_status": "approved"
     }
 
 
-# ==================================================
-# NODE 2 - HUMAN APPROVAL
-# ==================================================
+# ==========================================================
+# NODE 2 : HUMAN-IN-THE-LOOP
+# ==========================================================
+#
+# interrupt()
+#
+# This pauses the workflow.
+#
+# State is saved by MemorySaver.
+#
+# Workflow waits for human action.
+#
+# Once user approves/rejects,
+# graph continues from here.
+#
+# ==========================================================
 
 def manager_approval(state: ExpenseState):
 
-    print("\n[Node] Manager Approval")
+    print("\n[Node] manager_approval")
 
-    print(
-        f"Employee: {state['employee_name']}"
+    approval = interrupt(
+
+        {
+            "message":
+                f"Approve expense claim of ₹{state['amount']} ?",
+
+            "employee":
+                state["employee_name"]
+        }
+
     )
 
-    print(
-        f"Amount: ₹{state['amount']}"
-    )
-
-    decision = input(
-        "\nManager Decision (approve/reject): "
-    ).strip().lower()
+    # Execution resumes here after
+    # Command(resume="approve")
+    #
+    # or
+    #
+    # Command(resume="reject")
 
     return {
-        "approval_status": decision
+        "approval_status": approval
     }
 
 
-# ==================================================
-# NODE 3 - REIMBURSE EMPLOYEE
-# ==================================================
+# ==========================================================
+# NODE 3 : PROCESS PAYMENT
+# ==========================================================
+#
+# Executes when expense is approved.
+#
+# In real projects this could:
+# - Create payment record
+# - Call ERP system
+# - Update SQL Database
+# - Trigger Power Automate Flow
+#
+# ==========================================================
 
-def reimburse_employee(state: ExpenseState):
+def process_payment(state: ExpenseState):
 
-    print("\n[Node] Reimburse Employee")
+    print("\n[Node] process_payment")
 
     return {
         "result":
-        f"✅ Expense reimbursed to {state['employee_name']}"
+        f"✅ Expense approved for {state['employee_name']}"
     }
 
 
-# ==================================================
-# NODE 4 - REJECT EXPENSE
-# ==================================================
+# ==========================================================
+# NODE 4 : REJECT CLAIM
+# ==========================================================
+#
+# Executes when manager rejects.
+#
+# ==========================================================
 
-def reject_expense(state: ExpenseState):
+def reject_claim(state: ExpenseState):
 
-    print("\n[Node] Reject Expense")
+    print("\n[Node] reject_claim")
 
     return {
         "result":
-        f"❌ Expense claim rejected for {state['employee_name']}"
+        f"❌ Expense rejected for {state['employee_name']}"
     }
 
 
-# ==================================================
+# ==========================================================
 # ROUTER FUNCTION
-# ==================================================
+# ==========================================================
+#
+# Conditional edges use this function.
+#
+# Returns:
+# - pending
+# - approved
+# - approve
+# - reject
+#
+# Based on return value LangGraph
+# decides next node.
+#
+# ==========================================================
 
-def route_status(state: ExpenseState):
+def route_approval(state: ExpenseState):
 
     return state["approval_status"]
 
 
-# ==================================================
+# ==========================================================
 # BUILD GRAPH
-# ==================================================
+# ==========================================================
 
 builder = StateGraph(ExpenseState)
 
 
-# Nodes
+# ==========================================================
+# REGISTER NODES
+# ==========================================================
+#
+# Format:
+#
+# builder.add_node(
+#     "NodeName",
+#     function_name
+# )
+#
+# ==========================================================
 
 builder.add_node(
     "validate_expense",
@@ -132,108 +203,196 @@ builder.add_node(
 )
 
 builder.add_node(
-    "reimburse_employee",
-    reimburse_employee
+    "process_payment",
+    process_payment
 )
 
 builder.add_node(
-    "reject_expense",
-    reject_expense
-)
+    "reject_claim",
+    reject_claim)
 
 
-# ==================================================
+# ==========================================================
 # ENTRY POINT
-# ==================================================
+# ==========================================================
+#
+# Graph execution starts here.
+#
+# START
+#   |
+#   v
+# validate_expense
+#
+# ==========================================================
 
 builder.set_entry_point(
     "validate_expense"
 )
 
 
-# ==================================================
-# CONDITIONAL EDGE 1
-# ==================================================
+# ==========================================================
+# CONDITIONAL EDGE #1
+# ==========================================================
 #
-# pending  -> manager approval
-# approved -> reimburse
-# reject   -> reject expense
+# After validate_expense node:
 #
-# ==================================================
+# pending
+#   |
+#   v
+# manager_approval
+#
+# approved
+#   |
+#   v
+# process_payment
+#
+# ==========================================================
 
 builder.add_conditional_edges(
     "validate_expense",
-    route_status,
+    route_approval,
     {
         "pending": "manager_approval",
-        "approved": "reimburse_employee",
-        "reject": "reject_expense"
+        "approved": "process_payment"
     }
 )
 
-# ==================================================
-# CONDITIONAL EDGE 2
-# ==================================================
+
+# ==========================================================
+# CONDITIONAL EDGE #2
+# ==========================================================
 #
-# approve -> reimburse
-# reject  -> reject expense
+# After manager_approval:
 #
-# ==================================================
+# approve
+#   |
+#   v
+# process_payment
+#
+# reject
+#   |
+#   v
+# reject_claim
+#
+# ==========================================================
 
 builder.add_conditional_edges(
     "manager_approval",
-    route_status,
+    route_approval,
     {
-        "approve": "reimburse_employee",
-        "reject": "reject_expense"
+        "approve": "process_payment",
+        "reject": "reject_claim"
     }
 )
 
-# ==================================================
+
+# ==========================================================
 # FINAL EDGES
-# ==================================================
+# ==========================================================
+#
+# Approved workflow ends.
+#
+# Rejected workflow ends.
+#
+# ==========================================================
 
 builder.add_edge(
-    "reimburse_employee",
+    "process_payment",
     END
 )
 
 builder.add_edge(
-    "reject_expense",
+    "reject_claim",
     END
 )
 
 
-# ==================================================
+# ==========================================================
+# CHECKPOINTER
+# ==========================================================
+#
+# Required for interrupt().
+#
+# Stores graph state while workflow
+# is paused.
+#
+# Enterprise environments often use:
+# - PostgreSQL
+# - Redis
+# - SQL Server
+#
+# MemorySaver is good for learning.
+#
+# ==========================================================
+
+memory = MemorySaver()
+
+
+# ==========================================================
 # COMPILE GRAPH
-# ==================================================
+# ==========================================================
+#
+# Converts graph definition
+# into executable workflow.
+#
+# ==========================================================
 
-graph = builder.compile()
+graph = builder.compile(
+    checkpointer=memory
+)
 
 
-# ==================================================
-# INPUT
-# ==================================================
+# ==========================================================
+# THREAD CONFIGURATION
+# ==========================================================
+#
+# thread_id uniquely identifies
+# workflow instance.
+#
+# Required for pause/resume.
+#
+# ==========================================================
 
-initial_state = {
-    "employee_name": "Kedar",
-    "amount": 75000,
-    "receipt_available": True,
-    "approval_status": "",
-    "result": ""
+config = {
+    "configurable": {
+        "thread_id": "expense-001"
+    }
 }
 
 
-# ==================================================
-# EXECUTE GRAPH
-# ==================================================
+# ==========================================================
+# START WORKFLOW
+# ==========================================================
 
-print("\n=== Expense Claim Workflow Started ===")
+result = graph.invoke(
+    {
+        "employee_name": "Kedar",
+        "amount": 75000,
+        "approval_status": "",
+        "result": ""
+    },
+    config=config
+)
 
-result = graph.invoke(initial_state)
-
-print("\n=== Final State ===")
+print("\nWorkflow Paused")
 print(result)
 
-print("\n=== Final Result ===")
-print(result["result"])
+
+# ==========================================================
+# MANAGER APPROVES
+# ==========================================================
+#
+# Imagine user clicks Approve
+# button in UI.
+#
+# ==========================================================
+
+resume_result = graph.invoke(
+    Command(
+        resume="approve"
+    ),
+    config=config
+)
+
+print("\nWorkflow Completed")
+print(resume_result)
